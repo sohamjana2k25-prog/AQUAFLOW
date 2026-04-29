@@ -29,18 +29,30 @@ class PriorityRoutingEngine:
         """
         The Multi-Objective Cost Function logic.
         Formula: W(e, u) = L(e) * C(e) * P(u, e).
-        
-        Note: The priority is applied ONLY to the congestion penalty. This prevents 
-        the Global Scalar Trap, ensuring baseline distances aren't warped for empty roads.
         """
         length = edge_data.get('length', 1.0)
         flood_cost = edge_data.get('flood_cost', 1.0)
         current_load = edge_data.get('current_load', 0)
         capacity = edge_data.get('capacity', 50)
         
-        # Priority mapping: Emergency=5000, Commuter=1000, Leisure=200
-        # Example: Shopper multiplier = 5.0 | Ambulance multiplier = 0.2
+        # Base priority mapping for congestion
         priority_multiplier = 1000.0 / priority_level
+
+        # --- THE FIX: PRIORITY-BASED FLOOD PENALTY ---
+        # If the road is dry (1.0), it does nothing.
+        # If the road is wet (>1.0), the penalty scales drastically based on who is asking.
+        if flood_cost > 1.0:
+            if priority_level >= 5000:
+                # Emergency: Ignores 90% of the flood penalty to find the shortest physical path.
+                effective_flood_cost = flood_cost * 0.1 
+            elif priority_level <= 500:
+                # Hangout/Leisure: Has ZERO tolerance for water. Multiplies penalty by 20x to force a detour.
+                effective_flood_cost = flood_cost * 20.0 
+            else:
+                # Commuter: Standard penalty (tries to avoid, but will cross if detour is too long)
+                effective_flood_cost = flood_cost * 2.0
+        else:
+            effective_flood_cost = 1.0
 
         # Load Balancing: Dynamic Exponential Scaling
         load_penalty = 1.0
@@ -53,7 +65,7 @@ class PriorityRoutingEngine:
                 congestion_factor = overload_ratio ** 2 
                 load_penalty = 1.0 + (congestion_factor * priority_multiplier)
             
-        return length * flood_cost * load_penalty
+        return length * effective_flood_cost * load_penalty
 
     def calculate_priority_route(self, start_coords: Tuple[float, float], 
                                   end_coords: Tuple[float, float], 
@@ -72,7 +84,7 @@ class PriorityRoutingEngine:
                 self.graph, 
                 source=start_node, 
                 target=end_node, 
-                # The Fix: Pass priority_level directly into the weight evaluation
+                # Pass priority_level directly into the weight evaluation
                 weight=lambda u, v, d: self.custom_weight_function(u, v, d, priority_level)
             )
 
@@ -91,7 +103,6 @@ class PriorityRoutingEngine:
                     next_node = route_nodes[i+1]
                     # Get edge data (using [0] as OSMnx MultiDiGraphs can have multiple parallel edges)
                     edge_data = self.graph[node][next_node][0]
-                    print(f"Driving on Road ID: {edge_data.get('osmid')}")
                     total_length_meters += edge_data.get('length', 10.0)
                     total_cost_score += self.custom_weight_function(node, next_node, edge_data, priority_level)
 

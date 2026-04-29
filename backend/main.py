@@ -4,6 +4,21 @@ from pydantic import BaseModel
 from typing import List, Tuple, Dict
 from routing_engine import PriorityRoutingEngine
 import logging
+import os
+from dotenv import load_dotenv
+from supabase import create_client, Client
+
+# --- CRITICAL ADDITION: Load Supabase Credentials ---
+load_dotenv()
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# Initialize Supabase client ONLY if credentials exist
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+else:
+    supabase = None
+    print("WARNING: Supabase credentials not found in .env file!")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -94,6 +109,21 @@ def calculate_route(request: RouteRequest):
     """
     logger.info(f"Route requested: Priority {request.priority} from {request.start} to {request.end}")
     
+    # --- THE MISSING WIRE: Fetch active floods from Supabase before routing ---
+    if supabase:
+        try:
+            response = supabase.table("road_segments").select("osm_way_id, current_cost").eq("is_flooded", True).execute()
+            flooded_roads = response.data
+            
+            if flooded_roads:
+                logger.info(f"Syncing {len(flooded_roads)} flooded roads from Supabase.")
+                # Update the engine's internal memory
+                reports_dict = [{"road_id": int(road['osm_way_id']), "cost": road['current_cost']} for road in flooded_roads]
+                engine.update_road_costs(reports_dict)
+        except Exception as e:
+            logger.error(f"Failed to sync with Supabase: {e}")
+    # --------------------------------------------------------------------------
+
     result = engine.calculate_priority_route(
         start_coords=request.start,
         end_coords=request.end,

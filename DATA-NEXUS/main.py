@@ -1,7 +1,7 @@
 import os
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone # Import timezone for modern fix
 from typing import List, Optional
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,14 +38,12 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Weather API credentials
 OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")
 
-# City sectors with average elevation (example for Kolkata area)
-# You can expand this with more sectors
+# City sectors updated to match your Salt Lake / Sector V landmarks
 CITY_SECTORS = {
-    "salt_lake": {"lat": 22.5726, "lng": 88.4041, "elevation": 5, "name": "Salt Lake"},
-    "new_town": {"lat": 22.5850, "lng": 88.4150, "elevation": 7, "name": "New Town"},
-    "south_kolkata": {"lat": 22.5283, "lng": 88.3617, "elevation": 4, "name": "South Kolkata"},
-    "north_kolkata": {"lat": 22.6345, "lng": 88.3639, "elevation": 6, "name": "North Kolkata"},
-    "central": {"lat": 22.5669, "lng": 88.3704, "elevation": 5, "name": "Central"},
+    "nicco_park": {"lat": 22.5714, "lng": 88.4234, "elevation": 4, "name": "Nicco Park / HM Block"},
+    "wipro_circle": {"lat": 22.5744, "lng": 88.4339, "elevation": 3, "name": "Wipro / Sector V Hub"},
+    "city_centre": {"lat": 22.5891, "lng": 88.4082, "elevation": 5, "name": "City Centre 1"},
+    "college_more": {"lat": 22.5775, "lng": 88.4315, "elevation": 4, "name": "Techno Main / College More"},
 }
 
 # Risk level thresholds
@@ -91,12 +89,12 @@ async def get_rainfall_data(lat: float, lng: float) -> dict:
             
             return {
                 "rainfall_mm_hr": rainfall_mm_hr,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "conditions": data.get("current", {}).get("weather", [{}])[0].get("main", "Unknown")
             }
     except Exception as e:
         logger.error(f"Error fetching rainfall data: {e}")
-        return {"rainfall_mm_hr": 0, "timestamp": datetime.utcnow().isoformat(), "error": str(e)}
+        return {"rainfall_mm_hr": 0, "timestamp": datetime.now(timezone.utc).isoformat(), "error": str(e)}
 
 def calculate_risk_level(rainfall_mm_hr: float, elevation: int) -> dict:
     """
@@ -145,13 +143,13 @@ async def update_sector_risks():
                 # Calculate risk
                 risk_info = calculate_risk_level(rainfall_mm_hr, sector_data["elevation"])
                 
-                # Update Supabase
+                # Update Supabase - columns synced with your new SQL schema
                 supabase.table("city_sectors").update({
                     "rainfall_mm_hr": rainfall_mm_hr,
                     "risk_level": risk_info["risk_level"],
                     "risk_score": risk_info["risk_score"],
                     "risk_percentage": risk_info["risk_percentage"],
-                    "last_updated": datetime.utcnow().isoformat()
+                    "last_updated": datetime.now(timezone.utc).isoformat()
                 }).eq("sector_id", sector_id).execute()
                 
                 logger.info(f"Updated {sector_data['name']}: {risk_info['risk_level']} risk (Score: {risk_info['risk_score']})")
@@ -179,7 +177,7 @@ async def get_sector_risks():
         sectors = response.data if response.data else []
         return {
             "status": "success",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "sectors": sectors
         }
     except Exception as e:
@@ -207,7 +205,7 @@ async def submit_flood_report(
         
         # Upload image to Supabase Storage if provided
         if file:
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             filename = f"reports/{timestamp}_{file.filename}"
             
             file_content = await file.read()
@@ -227,7 +225,7 @@ async def submit_flood_report(
             "water_depth": water_depth,
             "description": description,
             "image_url": image_url,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "verified": False
         }
         
@@ -250,14 +248,14 @@ async def submit_flood_report(
 async def check_consensus_and_update_roads(latitude: float, longitude: float):
     """
     Consensus Algorithm:
-    - A road segment's cost only increases if there are ≥3 reports 
+    - A road segment's cost only increases if there are >= 3 reports 
       within a 100-meter radius in the last 60 minutes
     """
     try:
         # Query for nearby reports in the last 60 minutes
-        time_threshold = (datetime.utcnow() - timedelta(minutes=60)).isoformat()
+        time_threshold = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat()
         
-        # Use PostGIS ST_DWithin function to find nearby reports
+        # Use PostGIS ST_DWithin function via RPC call
         nearby_reports = supabase.rpc(
             "get_nearby_reports",
             {
@@ -274,7 +272,7 @@ async def check_consensus_and_update_roads(latitude: float, longitude: float):
         
         # If threshold met, update road segments
         if report_count >= 3:
-            # Find the nearest road segment
+            # Find the nearest road segment via RPC call
             nearest_road = supabase.rpc(
                 "get_nearest_road",
                 {"lat": latitude, "lng": longitude}
@@ -283,11 +281,11 @@ async def check_consensus_and_update_roads(latitude: float, longitude: float):
             if nearest_road.data and len(nearest_road.data) > 0:
                 road_id = nearest_road.data[0]["id"]
                 
-                # Update road cost (multiply by flood factor)
+                # Update road cost for Terminal 1 routing engine
                 supabase.table("road_segments").update({
                     "current_cost": 500,  # High cost for flooded road
                     "is_flooded": True,
-                    "last_flooded": datetime.utcnow().isoformat()
+                    "last_flooded": datetime.now(timezone.utc).isoformat()
                 }).eq("id", road_id).execute()
                 
                 logger.info(f"Road {road_id} marked as flooded (consensus reached)")
@@ -301,9 +299,8 @@ async def check_consensus_and_update_roads(latitude: float, longitude: float):
 @app.get("/live-costs")
 async def get_live_road_costs():
     """
-    GET endpoint that returns current road costs
+    GET endpoint that returns current road costs for the routing algorithm
     Used by Member 2's routing algorithm
-    Format: [{"road_id": 101, "cost": 500}, ...]
     """
     try:
         response = supabase.table("road_segments").select("id, current_cost").execute()
@@ -315,7 +312,7 @@ async def get_live_road_costs():
         
         return {
             "status": "success",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "roads": costs
         }
     except Exception as e:
@@ -329,8 +326,7 @@ async def get_live_road_costs():
 @app.get("/admin/gallery")
 async def get_report_gallery(limit: int = 10):
     """
-    Admin endpoint to view recent flood reports
-    Shows: photo URL, timestamp, GPS location, water depth
+    Admin endpoint to view recent flood reports with photos
     Perfect for the hackathon demo/pitch
     """
     try:
@@ -369,7 +365,7 @@ async def get_report_gallery(limit: int = 10):
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 @app.get("/debug/sectors")
 async def debug_sectors():
